@@ -66,7 +66,7 @@ class DownSampleBlock(nn.Module):
         """
         x = self.layers(x)
         emb = self.emb_layer(t_embedding)
-        emb = emb.view(emb.shape[0], emb.shape[1], 1, 1).repeat(1, 1, x.shape[-2], x.shape[-1])
+        emb = emb[:, :, None, None].repeat(1, 1, x.shape[-2], x.shape[-1])
         return x + emb
 
 
@@ -126,7 +126,7 @@ class SelfAttentionBlock(nn.Module):
         attention_value, _ = self.mha(query=x_ln, key=x_ln, value=x_ln)
         x = attention_value + x
         x = self.mlp(self.ln_2(x)) + x
-        return x.permute(0, 2, 1).view(-1, self.num_channels, self.size, self.size)
+        return x.permute(0, 2, 1).contiguous().view(-1, self.num_channels, self.size, self.size)
 
 
 class UNet(nn.Module):

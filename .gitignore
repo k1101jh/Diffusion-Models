@@ -5,6 +5,8 @@ datasets/
 results/
 saved_models/
 runs/
+running_results/
+samples/
 
 ### Python ###
 # Byte-compiled / optimized / DLL files
