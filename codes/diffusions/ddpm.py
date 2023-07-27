@@ -27,7 +27,7 @@ class DDPM(AbstractDiffusion):
                 
         self.betas = self.linear_beta_schedule().to(device)
         self.alphas = 1. - self.betas
-        self.alphas_hat = torch.cumprod(self.alphas, dim=0)
+        self.alphas_bar = torch.cumprod(self.alphas, dim=0)
 
     def sample(self, model, n, gif_path=None, gif_term = 10):
         """ Sample images from noise images
@@ -51,7 +51,7 @@ class DDPM(AbstractDiffusion):
                 t = (torch.ones(n) * i).long().to(self.device)
                 predicted_noise = model(x, t)
                 alpha = self.alphas[t][:, None, None, None]
-                alpha_hat = self.alphas_hat[t][:, None, None, None]
+                alpha_hat = self.alphas_bar[t][:, None, None, None]
                 beta = self.betas[t][:, None, None, None]
                 
                 if i > 1:

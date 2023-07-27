@@ -64,8 +64,8 @@ class AbstractDiffusion(metaclass=ABCMeta):
         Returns:
             torch.tensor: noised image
         """
-        sqrt_alpha_hat = torch.sqrt(self.alphas_hat[t])[:, None, None, None]
-        sqrt_one_minus_alpha_hat = torch.sqrt(1 - self.alphas_hat[t])[:, None, None, None]
+        sqrt_alpha_hat = torch.sqrt(self.alphas_bar[t])[:, None, None, None]
+        sqrt_one_minus_alpha_hat = torch.sqrt(1 - self.alphas_bar[t])[:, None, None, None]
         e = torch.randn_like(x)
         return sqrt_alpha_hat * x + sqrt_one_minus_alpha_hat * e, e
     

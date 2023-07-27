@@ -1,6 +1,7 @@
 import os
 import logging
 import argparse
+import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from accelerate import Accelerator
@@ -15,9 +16,9 @@ import torchvision
 from torchvision.datasets import ImageFolder
 from torch.utils.tensorboard import SummaryWriter
 
-from backbones.unet import UNet
+from backbones.unet import UNet, UNet_conditional
 from diffusions.ddpm import DDPM
-from utils import get_grid_images, plot_images, save_images
+from utils import get_grid_images, plot_images, save_images, setup_logging
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "6, 7"
 
@@ -51,10 +52,10 @@ def train(run_name, epochs, batch_size, image_size, dataset_path: str, lr: float
     accelerator = Accelerator()
     device = accelerator.device
     
-    image_save_dir = os.path.join('./results', run_name)
-    model_save_dir = os.path.join('./saved_models', run_name)
-    os.makedirs(image_save_dir, exist_ok=True)
-    os.makedirs(model_save_dir, exist_ok=True)
+    model_save_dir = "../models" + run_name
+    result_save_dir = "../results" + run_name
+    
+    setup_logging(model_save_dir, result_save_dir)
     
     model = UNet().to(device)
     
@@ -73,7 +74,7 @@ def train(run_name, epochs, batch_size, image_size, dataset_path: str, lr: float
 
     criterion = nn.MSELoss()
     diffusion = DDPM(image_size=image_size, device=device)
-    writer = SummaryWriter(os.path.join("runs", args.run_name))
+    writer = SummaryWriter(os.path.join("../runs", run_name))
 
     for epoch in range(1, epochs + 1):
         logging.info(f"Starting epoch {epoch}:")
@@ -95,7 +96,7 @@ def train(run_name, epochs, batch_size, image_size, dataset_path: str, lr: float
             
             if use_ema:
                 ema.update()
-
+                
         pbar.close()
         writer.add_scalar("MSE", epoch_loss, global_step=epoch)    
 
@@ -104,16 +105,81 @@ def train(run_name, epochs, batch_size, image_size, dataset_path: str, lr: float
                 if use_ema:
                     ema_sampled_images = diffusion.sample(ema.ema_model, num_test_images)
                     ema_grid = get_grid_images(ema_sampled_images)
-                    save_images(ema_grid, os.path.join(image_save_dir, f"{epoch}_ema.png"))
+                    save_images(ema_grid, os.path.join(result_save_dir, f"{epoch}_ema.png"))
                     writer.add_image('sample images ema', ema_grid, global_step=epoch)
                     
                 sampled_images = diffusion.sample(model, num_test_images)
                 grid = get_grid_images(sampled_images)
-                save_images(grid, os.path.join(image_save_dir, f"{epoch}.png"))
+                save_images(grid, os.path.join(result_save_dir, f"{epoch}.png"))
                 writer.add_image('sample images', grid, global_step=epoch)
+            
+            save_dict = {
+                'model': model.state_dict(),
+                'ema_model': ema.state_dict() if use_ema else None,
+                'optimizer': optimizer.state_dict(),
+            }
+            torch.save(save_dict, os.path.join(model_save_dir, f"ckpt.pt"))
                 
-                
-                
+    # conditional
+    model = UNet_conditional().to(device)
+    
+    if use_ema:
+        ema = EMA(
+            model,
+            beta=0.9999,
+            update_after_step=100,
+            update_every=10,
+        )
+        ema.to(device)
+        
+    optimizer = optim.AdamW(model.parameters(), lr=lr)
+    dataloader = get_data(image_size, batch_size, dataset_path)
+    model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
+
+    criterion = nn.MSELoss()
+    diffusion = DDPM(image_size=image_size, device=device)
+    writer = SummaryWriter(os.path.join("../runs", run_name))
+    
+    for epoch in range(1, epochs + 1):
+        logging.info(f"Starting epoch {epoch}:")
+        pbar = tqdm(dataloader)
+        epoch_loss = 0.0
+        for i, (images, labels) in enumerate(pbar):
+            images = images.to(device)
+            labels = labels.to(device)
+            t = diffusion.sample_timesteps(images.shape[0]).to(device)
+            x_t, noise = diffusion.noise_images(images, t)
+            if np.random.random() < 0.1:
+                labels = None
+            predicted_noise = model(x_t, t)
+            loss = criterion(noise, predicted_noise)
+            
+            optimizer.zero_grad()
+            accelerator.backward(loss)
+            optimizer.step()
+
+            pbar.set_postfix(MSE=loss.item())
+            epoch_loss += loss.item()
+            
+            if use_ema:
+                ema.update()
+
+        pbar.close()
+        writer.add_scalar("MSE", epoch_loss, global_step=epoch)    
+
+        if epoch % test_term == 0:
+            with torch.no_grad():
+                labels = torch.arange(10).long().to(device)
+                if use_ema:
+                    ema_sampled_images = diffusion.sample(ema.ema_model, num_test_images, labels=labels)
+                    ema_grid = get_grid_images(ema_sampled_images)
+                    save_images(ema_grid, os.path.join(result_save_dir, f"{epoch}_ema.png"))
+                    writer.add_image('sample images ema', ema_grid, global_step=epoch)
+                    
+                sampled_images = diffusion.sample(model, num_test_images, labels=labels)
+                grid = get_grid_images(sampled_images)
+                save_images(grid, os.path.join(result_save_dir, f"{epoch}.png"))
+                writer.add_image('sample images', grid, global_step=epoch)
             
             save_dict = {
                 'model': model.state_dict(),
@@ -123,22 +189,28 @@ def train(run_name, epochs, batch_size, image_size, dataset_path: str, lr: float
             torch.save(save_dict, os.path.join(model_save_dir, f"ckpt.pt"))
 
 
-if __name__ == "__main__":
+def launch():
     parser = argparse.ArgumentParser()
     args = parser.parse_args()
     args.run_name = "DDPM"
     args.epochs = 500
     args.batch_size = 4
     args.image_size = 64
-    args.dataset_path = r"./datasets/Landscape Pictures"
+    args.dataset_path = r"../datasets/Landscape Pictures"
     args.lr = 3e-4
     args.test_term = 10
     args.use_ema = False
-    train(args.run_name,
-          args.epochs,
-          args.batch_size,
-          args.image_size,
-          args.dataset_path,
-          args.lr,
-          args.test_term,
-          args.use_ema)
+    
+    train(*args)
+    # train(args.run_name,
+    #       args.epochs,
+    #       args.batch_size,
+    #       args.image_size,
+    #       args.dataset_path,
+    #       args.lr,
+    #       args.test_term,
+    #       args.use_ema)
+
+if __name__ == "__main__":
+    launch()
+    
